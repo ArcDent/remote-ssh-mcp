@@ -1,0 +1,30 @@
+{
+  "name": "remote-ssh-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that runs common ops commands on SSH config aliases",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "remote-ssh-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "call": "node scripts/call.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# 工作流过程文件
+/TODOLIST.md
+/TODOLIST-DONE.md
+/todolist-done/
+/openspec/
+
+# 本机工具目录
+/.serena/
