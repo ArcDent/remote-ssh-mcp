@@ -9,3 +9,4 @@ dist/
 
 # 本机工具目录
 /.serena/
+/.local/

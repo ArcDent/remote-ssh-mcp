@@ -2,20 +2,20 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
-export const DEFAULT_SSH_CONFIG = join(homedir(), ".ssh", "config");
+const DEFAULT_SSH_CONFIG = join(homedir(), ".ssh", "config");
 
-/** Concrete Host aliases (no wildcard / negated patterns) from an ssh config and its Includes. */
+/** ssh config 及其 Include 的文件里写明的 Host 别名，不含通配和取反模式。 */
 export function listHosts(configPath = DEFAULT_SSH_CONFIG): string[] {
   const hosts = new Set<string>();
   collect(configPath, hosts, new Set());
   return [...hosts];
 }
 
-/** Throws with the list of valid aliases when `host` is not one of them. */
+/** `host` 不是其中之一时抛错，报错里列出所有可用别名。 */
 export function assertHost(host: string, configPath = DEFAULT_SSH_CONFIG): void {
   const hosts = listHosts(configPath);
   if (!hosts.includes(host)) {
-    throw new Error(`Unknown host "${host}". Use an ~/.ssh/config alias: ${hosts.join(", ")}`);
+    throw new Error(`未知主机「${host}」。请用 ~/.ssh/config 里的别名：${hosts.join(", ")}`);
   }
 }
 
@@ -47,7 +47,7 @@ function collect(file: string, hosts: Set<string>, seen: Set<string>): void {
   }
 }
 
-/** Include paths are relative to ~/.ssh; supports `~` and `*`/`?` globs in the last path segment. */
+/** Include 的相对路径按 ~/.ssh 解析；支持 `~`，路径最后一段支持 `*`、`?` 通配。 */
 function expandInclude(pattern: string): string[] {
   let p = pattern.replace(/^~(?=\/|$)/, homedir());
   if (!isAbsolute(p)) p = join(homedir(), ".ssh", p);

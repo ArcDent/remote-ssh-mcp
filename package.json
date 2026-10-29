@@ -1,7 +1,7 @@
 {
   "name": "remote-ssh-mcp",
   "version": "0.1.0",
-  "description": "MCP server that runs common ops commands on SSH config aliases",
+  "description": "按 ~/.ssh/config 里的主机别名在远程主机上执行常用运维命令的 MCP 服务",
   "type": "module",
   "private": true,
   "license": "MIT",
