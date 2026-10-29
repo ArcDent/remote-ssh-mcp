@@ -1,4 +1,4 @@
-// Local debug client: starts dist/index.js over stdio and lists or calls tools.
+// 本地调试客户端：经 stdio 启动 dist/index.js，列出或调用工具。
 //   npm run call -- --list [--json]
 //   npm run call -- <tool> '<json args>'
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,7 +19,7 @@ if (!tool || tool === "--list") {
   const { tools } = await client.listTools();
   if (process.argv.includes("--json")) console.log(JSON.stringify(tools, null, 2));
   else for (const t of tools) console.log(t.name);
-  console.error(`[${tools.length} tools, definitions ${JSON.stringify(tools).length} chars]`);
+  console.error(`[共 ${tools.length} 个工具，定义 ${JSON.stringify(tools).length} 字符]`);
 } else {
   const t0 = performance.now();
   const res = await client.callTool({ name: tool, arguments: json ? JSON.parse(json) : {} });
