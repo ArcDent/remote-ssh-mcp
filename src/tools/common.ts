@@ -5,7 +5,7 @@ import { checkCommand } from "../guard.js";
 import { assertHost } from "../hosts.js";
 import { DEFAULT_MAX_CHARS, formatResult, text } from "../output.js";
 import {
-  clampTimeout, KILL_GRACE_S, MAX_TIMEOUT_S, probeHost, remoteTimeoutWrap, runSsh, type SshResult,
+  clampTimeout, KILL_GRACE_S, MAX_TIMEOUT_S, probeHost, remoteTimeoutWrap, runSsh, shQuote, type SshResult,
 } from "../ssh.js";
 
 // 这里不写字段说明：别名列表只在 exec 的说明里写一次。工具定义每轮都要发给模型，
@@ -24,7 +24,7 @@ export type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 export type ToolFilter = (name: string) => boolean;
 
 /** 没设 SSH_MCP_TOOLS 时暴露的工具；其余工具的代码还在，默认不暴露。 */
-const DEFAULT_TOOLS = ["exec", "file_write"];
+const DEFAULT_TOOLS = ["exec", "file_write", "job"];
 
 /** 解析 SSH_MCP_TOOLS：要暴露的工具名，逗号或空格分隔；也可以写 "all"。 */
 export function toolFilter(spec: string | undefined): ToolFilter {
@@ -106,6 +106,11 @@ export function progressReporter(extra: ToolExtra | undefined, timeoutS: number)
       })
       .catch(() => {});
   };
+}
+
+/** 在 docker 容器里用 sh 运行 cmd；标准输入经 `docker exec -i` 传进容器。 */
+export function inContainer(cmd: string, container?: string): string {
+  return container ? `docker exec -i ${shQuote(container)} sh -c ${shQuote(cmd)}` : cmd;
 }
 
 export { sh, shQuote } from "../ssh.js";
