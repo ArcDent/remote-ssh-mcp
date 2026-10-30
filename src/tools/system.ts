@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { hostArg, run, sh, shQuote, type ToolFilter } from "./common.js";
+import { hostArg, run, sh, shQuote, sudoArgs, type ToolFilter } from "./common.js";
 
 // df 的列从末尾往前数，因为文件系统名可能带空格（"C:/Program Files/Git"）。
 const SNAPSHOT = `
@@ -17,9 +17,9 @@ export function registerSystem(server: McpServer, on: ToolFilter): void {
     "sys_snapshot",
     {
       description: "一次调用查出 Linux 主机的内存、根分区磁盘、负载和监听中的 TCP 端口。",
-      inputSchema: { host: hostArg },
+      inputSchema: { host: hostArg, ...sudoArgs },
     },
-    ({ host }, extra) => run(host, sh(SNAPSHOT), { extra }),
+    ({ host, sudo, pswd }, extra) => run(host, sh(SNAPSHOT), { extra, sudo, pswd }),
   );
 
   if (on("service_status")) server.registerTool(
@@ -31,9 +31,10 @@ export function registerSystem(server: McpServer, on: ToolFilter): void {
         unit: z.string().regex(/^[A-Za-z0-9@._:\\-]+$/).refine((u) => !u.startsWith("-")),
         lines: z.number().int().min(0).max(500).default(20).describe("journal 日志行数，0 表示不看"),
         since: z.string().optional().describe('journalctl --since 的值，如 "2 hours ago"'),
+        ...sudoArgs,
       },
     },
-    ({ host, unit, lines, since }, extra) => {
+    ({ host, unit, lines, since, sudo, pswd }, extra) => {
       const script = `u=${shQuote(unit)}
 command -v systemctl >/dev/null 2>&1 || { echo "systemctl not found (service_status needs a host with systemd)" >&2; exit 127; }
 ls=$(systemctl show -p LoadState --value "$u" 2>&1)
@@ -45,7 +46,7 @@ echo "enabled: $(systemctl is-enabled "$u" 2>&1)"
 J=journalctl; [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null && J="sudo -n journalctl"
 echo "== journal"
 $J -u "$u" -n ${lines}${since ? ` --since ${shQuote(since)}` : ""} --no-pager -o short-iso 2>&1`;
-      return run(host, sh(script), { extra });
+      return run(host, sh(script), { extra, sudo, pswd });
     },
   );
 }

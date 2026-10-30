@@ -9,6 +9,7 @@
 - 脚本和数据经标准输入传过去，在容器里跑命令，在 Windows 主机上跑 PowerShell，都不需要 agent 自己处理多层引号，减轻运维负担。
 - 耗时长的命令放到后台跑，之后查进度、列出任务或停掉任务，不用 `sleep` 轮询。
 - 写远端文件或只改其中几处，会覆盖前自动备份到 `~/ops-backups/`。
+- 非 root 账号也能以 root 身份运行命令，sudo 要密码时由 agent 传入。
 - 输出里的密码、token 默认打码。
 - 重启关机、装包卸包这类危险命令默认拦下，并提示 agent 让用户手动执行。
 
@@ -50,6 +51,7 @@
 | `stdin` | 一段文本作为命令的标准输入，脚本、SQL 不用转义 | `{"host":"web1","cmd":"python3 -","stdin":"print('hi')"}` |
 | `container` | 在这个 docker 容器里跑，标准输入照样能传 | `{"host":"web1","container":"app","cmd":"cat /etc/os-release"}` |
 | `shell` | `posix`（默认）、`pwsh`（PowerShell 7）或 `powershell`（Windows PowerShell 5.1），其中PowerShell 脚本编码后传过去，不怕引号 | `{"host":"win1","shell":"powershell","cmd":"Get-Service sshd"}` |
+| `sudo`、`pswd` | 以 root 身份运行，见下面的「以 root 身份运行」 | `{"host":"web1","cmd":"id -un","sudo":true}` |
 | `redact` | 默认 `true`，把 `password=`、`token:`、`Bearer …` 这类值换成 `<redacted>`；要看原值时传 `false` | `{"host":"web1","cmd":"cat .env","redact":false}` |
 | `timeout` | 秒，默认 60，最多 3600 | |
 | `max_chars` | 每路输出上限，默认 4000，其中分段时各段共用，短的段省下的额度让给长的段 | |
@@ -100,13 +102,39 @@
 - 每个 `old` 的内容必须在文件里刚好出现一次，否则工具报错并写明出现了几次，此时不对文件进行任何操作。
 - 工具在本机算好替换再写回，写之前核对文件在这期间没被改过，然后照常先备份、再整体替换。只支持 1 MB 以内的 UTF-8 文本文件。
 
+### 以 root 身份运行
+
+每个工具都能加 `sudo: true`，整条命令以 root 身份运行。sudo 要密码时再传 `pswd`，一般填登录用户自己的密码；主机的 sudo 配置里设了 `rootpw` 时才填 root 的密码。
+
+```json
+{"host":"web1","cmd":"systemctl restart nginx","sudo":true,"pswd":"<登录用户的密码>"}
+```
+
+| 情况 | 结果 |
+|---|---|
+| 主机的 sudo 免密 | 只传 `sudo: true` 就行，传了 `pswd` 也用不上 |
+| 本来就用 root 登录 | 直接运行，主机没装 sudo 也行 |
+| sudo 要密码，传了 `pswd` | 以 root 身份运行 |
+| sudo 要密码，没传 `pswd` | 立即失败，提示传 `pswd` |
+| `pswd` 错了 | 失败，只试一次，不会连错几次把账号锁住 |
+| 非 root 登录，主机没装 sudo | 失败，`exit=127` |
+
+带 sudo 时家目录也换成 root 的，这两个工具的文件位置随之改变：
+
+| 工具 | 带 sudo 时 |
+|---|---|
+| `file_write` | 自动备份存进 `/root/ops-backups/` |
+| `job` | 任务文件放在 `/root/.mcp-jobs/`；用 sudo 启动的任务，`status`、`list`、`kill` 也要带 sudo，否则看不到 |
+
+- `pswd` 只能和 `sudo: true` 一起传。
+- `shell` 是 `pwsh` 或 `powershell` 时不能用 sudo。
+
 ## 适用范围
 
 - 适合在 `~/.ssh/config` 里配好的 Linux 主机上排查问题、改配置。
 - Windows 主机用 `exec` 加 `shell`（可用 `SSH_MCP_HOST_SHELLS` 设成默认），其余工具都按 Linux 命令写。
 - Windows PowerShell 5.1 和 pwsh 7 已在 Windows 11（Win32-OpenSSH，默认 shell 为 Git Bash）上实测过。
-- 需要交互式终端的操作（`top`、`vim`、要输密码的 `sudo`）请直接开 ssh。
-- 非 root 账号的主机上，写 `/etc` 或运行 docker 可能没有权限，工具不提供 sudo 参数。
+- 需要交互式终端的操作（`top`、`vim`）请直接开 ssh。
 
 ## 超时
 
@@ -131,33 +159,29 @@
 
 ## 安装
 
-先在仓库里构建：
-
-```sh
-npm install && npm run build
-```
-
-然后把下面的配置加进你的 MCP 客户端，路径换成仓库所在位置：
+把下面的配置加进你的 MCP 客户端，`npx` 会自动下载最新版：
 
 ```json
 {
   "mcpServers": {
     "remote-ssh": {
-      "command": "node",
-      "args": ["/path/to/remote-ssh-mcp/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@arcdent/remote-ssh-mcp"]
     }
   }
 }
 ```
 
+想固定版本就写成 `@arcdent/remote-ssh-mcp@0.2.0`。从源码运行时，先在仓库里 `npm install`（会顺带构建），再把配置改成 `"command": "node"`、`"args": ["/path/to/remote-ssh-mcp/dist/index.js"]`。
+
 <details>
 <summary>Claude Code</summary>
 
 ```sh
-claude mcp add remote-ssh -s user -- node /path/to/remote-ssh-mcp/dist/index.js
+claude mcp add remote-ssh -s user -- npx -y @arcdent/remote-ssh-mcp
 ```
 
-要放开某类危险命令时加 `-e`，如 `claude mcp add remote-ssh -s user -e SSH_MCP_ALLOW_PKG=1 -- node …`。
+要放开某类危险命令时加 `-e`，如 `claude mcp add remote-ssh -s user -e SSH_MCP_ALLOW_PKG=1 -- npx -y @arcdent/remote-ssh-mcp`。
 
 </details>
 
@@ -199,6 +223,7 @@ npm run call -- exec '{"host":"web1","cmds":{"disk":"df -h / | tail -1","load":"
 - 危险命令被拦时，工具提示 agent 让你自己 ssh 上去执行。
 - `cmd` 是 `sh`、`bash -s` 这类从标准输入读脚本的命令时，`stdin` 里的脚本同样要过危险命令检查。
 - 只演示不执行的装包命令放行：apt / apt-get / aptitude 带 `-s`、`--simulate`、`--dry-run`、`--just-print`、`--no-act` 时不拦。
+- `pswd` 不会出现在远端的进程列表里，也不会写进主机上的文件。
 - `file_write` 拒绝把 `<redacted>` 写进原本没有它的文件，免得把打码后的内容写回去、覆盖掉真密码。
 
 ## 开发

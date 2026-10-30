@@ -1,0 +1,47 @@
+# 推送 v 开头的 tag（如 v0.2.0）时：跑测试，发布到 npm，再建 GitHub Release
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # tag 必须和 package.json 的版本号一致，防止忘了改版本号就打 tag
+      - name: 核对版本号
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag 是 $GITHUB_REF_NAME，package.json 却是 $pkg"
+            exit 1
+          fi
+
+      # npm ci 会顺带执行 prepare，也就是构建
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: 发布到 npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 建 GitHub Release 并附上安装包
+        run: |
+          npm pack
+          gh release create "$GITHUB_REF_NAME" --generate-notes *.tgz
+        env:
+          GH_TOKEN: ${{ github.token }}
