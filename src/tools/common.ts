@@ -5,7 +5,7 @@ import { checkCommand } from "../guard.js";
 import { assertHost } from "../hosts.js";
 import { DEFAULT_MAX_CHARS, formatResult, text } from "../output.js";
 import {
-  clampTimeout, KILL_GRACE_S, MAX_TIMEOUT_S, probeHost, remoteTimeoutWrap, runSsh, shQuote, type SshResult,
+  clampTimeout, KILL_GRACE_S, MAX_TIMEOUT_S, probeHost, remoteTimeoutWrap, runSsh, shQuote, sudoWrap, type SshResult,
 } from "../ssh.js";
 
 // 这里不写字段说明：别名列表只在 exec 的说明里写一次。工具定义每轮都要发给模型，
@@ -17,6 +17,11 @@ export const timeoutArg = z
 export const maxCharsArg = z
   .number().int().min(200).max(100000).optional()
   .describe(`每路输出的字符上限，默认 ${DEFAULT_MAX_CHARS}`);
+/** 每个工具都有的 sudo、pswd 参数；说明只写在 exec 里。 */
+export const sudoArgs = {
+  sudo: z.boolean().optional(),
+  pswd: z.string().refine((p) => !p.includes("\n"), "pswd 不能含换行").optional(),
+};
 
 export type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -49,6 +54,17 @@ interface RunOptions {
    * 登录 shell 为 bash 的 MSYS 主机上加。
    */
   posix?: boolean;
+  /** 经 sudo 以 root 身份运行（见 sudoWrap）。 */
+  sudo?: boolean;
+  /** sudo 要的密码，只能配 sudo。 */
+  pswd?: string;
+}
+
+/** sudo、pswd 的组合不对时返回原因。 */
+export function sudoRefusal(o: { sudo?: boolean; pswd?: string; posix?: boolean }): string | null {
+  if (o.pswd !== undefined && !o.sudo) return "pswd 要和 sudo: true 一起传。";
+  if (o.sudo && o.posix === false) return "sudo 只支持 shell posix。";
+  return null;
 }
 
 /**
@@ -65,18 +81,23 @@ export async function run(host: string, remoteCmd: string, o: RunOptions = {}): 
 }
 
 /**
- * 经 ssh 运行，不格式化结果；只有主机未知时才抛错。主机有 GNU `timeout` 时，到点由主机自己停掉
- * 命令，本机 ssh 客户端再多给一段宽限，这样命令在主机上就结束了，不会在 ssh 被杀后继续运行。
+ * 经 ssh 运行，不格式化结果；只有主机未知或 sudo、pswd 组合不对时才抛错。主机有 GNU `timeout` 时，
+ * 到点由主机自己停掉命令，本机 ssh 客户端再多给一段宽限，这样命令在主机上就结束了，不会在 ssh 被杀后
+ * 继续运行。带 sudo 时 `timeout` 包在 sudo 里面，以 root 身份停掉命令。
  */
 export async function runRaw(host: string, remoteCmd: string, o: RunOptions = {}): Promise<SshResult> {
   assertHost(host);
+  const refusal = sudoRefusal(o);
+  if (refusal) throw new Error(refusal);
   const probe = await probeHost(host);
   if (probe.failure) return probe.failure;
   const wrap = probe.timeout && (probe.msys || o.posix !== false);
   const timeoutS = clampTimeout(o.timeoutS);
-  const r = await runSsh(host, wrap ? remoteTimeoutWrap(remoteCmd, timeoutS, probe.msys) : remoteCmd, {
+  const timed = wrap ? remoteTimeoutWrap(remoteCmd, timeoutS, probe.msys) : remoteCmd;
+  const line = o.sudo ? sudoWrap(timed, o.stdin, o.pswd) : { cmd: timed, stdin: o.stdin };
+  const r = await runSsh(host, line.cmd, {
     timeoutS,
-    stdin: o.stdin,
+    stdin: line.stdin,
     graceS: wrap ? KILL_GRACE_S + 5 : 0,
     signal: o.extra?.signal,
     onTick: o.onTick ?? progressReporter(o.extra, timeoutS),
