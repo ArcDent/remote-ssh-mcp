@@ -6,7 +6,9 @@ import { assertHost, listHosts } from "../hosts.js";
 import { formatResult, formatSections, text } from "../output.js";
 import { decodeClixml, hostShells, powershellCommand, SHELLS, type Shell } from "../shell.js";
 import { clampTimeout } from "../ssh.js";
-import { hostArg, inContainer, maxCharsArg, progressReporter, runRaw, timeoutArg, type ToolExtra } from "./common.js";
+import {
+  hostArg, inContainer, maxCharsArg, progressReporter, runRaw, sudoArgs, sudoRefusal, timeoutArg, type ToolExtra,
+} from "./common.js";
 
 const MAX_CMDS = 10;
 /** 每次调用的主机数 × 命令数上限；每段运行占一个 ssh 会话。 */
@@ -32,6 +34,8 @@ const inputSchema = {
   timeout: timeoutArg,
   max_chars: maxCharsArg,
   redact: z.boolean().optional().describe("给输出里的密钥值打码（password=、token:、Bearer ...），默认 true"),
+  sudo: sudoArgs.sudo.describe("以 root 身份运行，家目录也换成 root 的；sudo 要密码时再传 pswd"),
+  pswd: sudoArgs.pswd.describe("sudo 要的密码，一般是登录用户自己的；只试一次"),
 };
 
 type ExecArgs = z.infer<z.ZodObject<typeof inputSchema>>;
@@ -75,6 +79,8 @@ async function exec(a: ExecArgs, extra: ToolExtra, shells: Map<string, Shell>): 
   });
   if (runs.length > MAX_RUNS) return text(`要跑的段数太多（${runs.length}）：主机数 × 命令数最多 ${MAX_RUNS}。`, true);
   if (a.container && runs.some((r) => r.shell !== "posix")) return text("container 只支持 shell posix。", true);
+  const badSudo = runs.map((r) => sudoRefusal({ sudo: a.sudo, pswd: a.pswd, posix: r.shell === "posix" })).find(Boolean);
+  if (badSudo) return text(badSudo, true);
   for (const r of runs) {
     const ps = r.shell !== "posix";
     const refusal =
@@ -87,7 +93,9 @@ async function exec(a: ExecArgs, extra: ToolExtra, shells: Map<string, Shell>): 
   const onTick = progressReporter(extra, timeoutS);
   const results = await Promise.all(
     runs.map(async (r, i) => {
-      const res = await runRaw(r.host, lines[i], { timeoutS, stdin: a.stdin, extra, onTick, posix: r.shell === "posix" });
+      const res = await runRaw(r.host, lines[i], {
+        timeoutS, stdin: a.stdin, extra, onTick, posix: r.shell === "posix", sudo: a.sudo, pswd: a.pswd,
+      });
       return r.shell === "posix" ? res : { ...res, stderr: decodeClixml(res.stderr) };
     }),
   );

@@ -170,6 +170,41 @@ export function remoteTimeoutWrap(remoteCmd: string, timeoutS: number, msys = fa
   return `${sh(script)} ${timeoutS} ${shQuote(remoteCmd)}`;
 }
 
+/** 带 pswd 时 askpass 从这个环境变量取密码；sudo 运行的命令里会去掉它。 */
+const PW_ENV = "MCP_SUDO_PW";
+
+/**
+ * 让 `remoteCmd` 经 sudo 以 root 身份运行（`-H` 让家目录也换成 root 的），返回新的命令行和标准输入。
+ * 已经是 root 时直接运行，主机没装 sudo 也不影响。
+ *
+ * 不带 pswd 时用 `sudo -n`，主机要密码就直接失败，并提示传 pswd。带 pswd 时，密码作为标准输入的第一行
+ * 传过去，不出现在命令行里，远端 `ps` 看不到；包装脚本读走这一行，余下的标准输入原样留给命令。密码经
+ * 临时的 askpass 程序交给 sudo；askpass 只给一次密码，密码错了 sudo 不会接着试，免得连错几次锁住账号。
+ */
+export function sudoWrap(remoteCmd: string, stdin?: string, pswd?: string): { cmd: string; stdin?: string } {
+  const asRoot = `[ "$(id -u)" = 0 ] && exec "\${SHELL:-sh}" -c "$1"
+command -v sudo >/dev/null 2>&1 || { echo "sudo not found on this host" >&2; exit 127; }`;
+  if (pswd === undefined) {
+    const script = `${asRoot}
+e=$(sudo -n true 2>&1) || { printf '%s\\n' "$e" "sudo needs a password on this host: pass pswd" >&2; exit 1; }
+exec sudo -n -H -- "\${SHELL:-sh}" -c "$1"`;
+    return { cmd: `${sh(script)} sh ${shQuote(remoteCmd)}`, stdin };
+  }
+  const script = `IFS= read -r p
+${asRoot}
+a=$(mktemp -d "\${HOME:-/tmp}/.mcp-askpass.XXXXXX") || exit 1
+trap 'rm -rf "$a"' EXIT; trap 'exit 1' HUP INT TERM
+cat > "$a/askpass" <<'EOF'
+#!/bin/sh
+[ -e "$0.used" ] && exit 1
+: > "$0.used"
+printf '%s\\n' "$${PW_ENV}"
+EOF
+chmod 700 "$a/askpass"
+${PW_ENV}=$p SUDO_ASKPASS=$a/askpass sudo -A -H -- env -u ${PW_ENV} "\${SHELL:-sh}" -c "$1"`;
+  return { cmd: `${sh(script)} sh ${shQuote(remoteCmd)}`, stdin: `${pswd}\n${stdin ?? ""}` };
+}
+
 /** 第一次调用某台主机时探测到的信息。 */
 export interface HostInfo {
   /** 有 GNU 或 uutils 的 `timeout`，主机能自己停掉命令（见 remoteTimeoutWrap）。 */

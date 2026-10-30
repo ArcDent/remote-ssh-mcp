@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
-  clampTimeout, Gate, KILL_GRACE_S, MAX_TIMEOUT_S, parseProbe, probeHost, remoteTimeoutWrap,
+  clampTimeout, Gate, KILL_GRACE_S, MAX_TIMEOUT_S, parseProbe, probeHost, remoteTimeoutWrap, sudoWrap,
 } from "../src/ssh.js";
 
 // 给 probeHost 用的 ssh 是假的；下面 shell 层面的测试仍用真的 spawnSync。
@@ -120,6 +120,92 @@ describe("remoteTimeoutWrap", () => {
     expect(r.stdout).toBe("a b|5|\n");
     expect(r.status).toBe(4);
     expect(r.stderr).toContain(`timeout-args: -k ${KILL_GRACE_S} 7`);
+  });
+});
+
+describe("sudoWrap", () => {
+  // 假 sudo：FAKE_SUDO_PW 为空表示免密；否则 -n 时直接失败，-A 时最多问 askpass 3 次，对上才运行命令。
+  // 真 sudo 运行命令前会清掉环境变量，这个不清，好检查命令里看不到密码变量。
+  const bin = mkdtempSync(join(tmpdir(), "ssh-mcp-sudo-"));
+  writeFileSync(
+    join(bin, "sudo"),
+    `#!/bin/sh
+A=; while :; do case "$1" in -n|-H) shift;; -A) A=1; shift;; --) shift; break;; *) break;; esac; done
+if [ -n "$FAKE_SUDO_PW" ]; then
+  [ -n "$A" ] || { echo "sudo: a password is required" >&2; exit 1; }
+  i=0; ok=
+  while [ $i -lt 3 ]; do
+    got=$("$SUDO_ASKPASS" "[sudo] password: ") || break
+    i=$((i+1))
+    [ "$got" = "$FAKE_SUDO_PW" ] && { ok=1; break; }
+    echo "Sorry, try again." >&2
+  done
+  [ -n "$ok" ] || { echo "sudo: $i incorrect password attempt" >&2; exit 1; }
+fi
+exec "$@"
+`,
+  );
+  chmodSync(join(bin, "sudo"), 0o755);
+  writeFileSync(join(bin, "timeout"), '#!/bin/sh\nshift 3\nexec "$@"\n');
+  chmodSync(join(bin, "timeout"), 0o755);
+  const home = mkdtempSync(join(tmpdir(), "ssh-mcp-sudo-home-"));
+  const login = (w: { cmd: string; stdin?: string }, needsPw = "") =>
+    spawnSync("/bin/sh", ["-c", w.cmd], {
+      input: w.stdin ?? "",
+      encoding: "utf8",
+      env: { PATH: `${bin}:${process.env.PATH}`, SHELL: "/bin/sh", HOME: home, FAKE_SUDO_PW: needsPw },
+    });
+  const cmd = `printf '%s|' "a b" 'it'"'"'s' "$((2+3))"; echo; exit 3`;
+
+  it("免密时不传 pswd 也能跑，命令和退出码原样传过去", () => {
+    const r = login(sudoWrap(cmd));
+    expect(r.stdout).toBe("a b|it's|5|\n");
+    expect(r.status).toBe(3);
+  });
+
+  it("要密码而没传 pswd 时直接失败，提示传 pswd", () => {
+    const r = login(sudoWrap("echo ran"), "s3cret");
+    expect(r.stdout).toBe("");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("pass pswd");
+  });
+
+  it("密码只在标准输入里，不进命令行，命令里也看不到密码变量", () => {
+    const w = sudoWrap(`echo "pw=\${MCP_SUDO_PW-unset}"`, undefined, "s3cret");
+    expect(w.cmd).not.toContain("s3cret");
+    expect(w.stdin).toBe("s3cret\n");
+    const r = login(w, "s3cret");
+    expect(r.stdout).toBe("pw=unset\n");
+    expect(r.status).toBe(0);
+  });
+
+  it("命令收到的标准输入和不带 sudo 时相同", () => {
+    const input = "line1\n'quoted' $HOME\nno newline at end";
+    expect(login({ cmd: "cat", stdin: input }).stdout).toBe(input);
+    expect(login(sudoWrap("cat", input), "").stdout).toBe(input);
+    expect(login(sudoWrap("cat", input, "s3cret"), "s3cret").stdout).toBe(input);
+    expect(login(sudoWrap("cat", input, "s3cret"), "").stdout).toBe(input);
+  });
+
+  it("密码错时 askpass 只给一次，sudo 不再接着试", () => {
+    const r = login(sudoWrap("echo ran", "x", "wrong"), "s3cret");
+    expect(r.stdout).toBe("");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("sudo: 1 incorrect password attempt");
+  });
+
+  it("跑完删掉临时的 askpass 目录", () => {
+    login(sudoWrap("true", undefined, "s3cret"), "s3cret");
+    login(sudoWrap("true", undefined, "wrong"), "s3cret");
+    expect(readdirSync(home)).toEqual([]);
+  });
+
+  it("timeout 包在 sudo 里面，退出码照样传回", () => {
+    const w = sudoWrap(remoteTimeoutWrap(cmd, 7), "", "s3cret");
+    expect(w.cmd).toMatch(/sudo -A -H -- env -u MCP_SUDO_PW .* 'sh -c '\\''exec timeout -k 5/);
+    const r = login(w, "s3cret");
+    expect(r.stdout).toBe("a b|it's|5|\n");
+    expect(r.status).toBe(3);
   });
 });
 
