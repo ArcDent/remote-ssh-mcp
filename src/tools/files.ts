@@ -134,7 +134,7 @@ base64 < "$p"`),
  * 把标准输入写进 `path`。内容先写到目标旁边的临时文件，写入被拒或失败时原文件不受影响。内容里有
  * REDACTED 时拒绝写入，除非原文件里本来就有：这个标记来自打码后的工具输出，写回去会冲掉真密钥。
  */
-function writeScript(path: string, mode: "overwrite" | "append", backup: boolean, expectSha?: string): string {
+export function writeScript(path: string, mode: "overwrite" | "append", backup: boolean, expectSha?: string): string {
   const unchanged = expectSha
     ? `[ -f "$p" ] && [ "$(sha256sum < "$p" | cut -d' ' -f1)" = ${shQuote(expectSha)} ] || ` +
       `{ echo "$p changed since it was read; read it again and retry" >&2; exit 1; }`
@@ -156,8 +156,12 @@ if [ ${shQuote(mode)} = append ]; then
 fi
 # auto backups share one directory, so name them after the full path (/etc/a.conf -> etc_a.conf)
 if [ -e "$p" ] && [ ${backup ? 1 : 0} = 1 ]; then bk "$p" auto "$(echo "$p" | sed 's|^/||; s|/|_|g')"; fi
+# copy owner, then mode: GNU and busybox take stat -c, macOS takes stat -f; chown after chmod would clear setuid
 if [ -e "$p" ]; then
-  chmod --reference="$p" "$t"; chown --reference="$p" "$t" 2>/dev/null || true
+  o=$(stat -c %u:%g "$p" 2>/dev/null || stat -f %u:%g "$p")
+  m=$(stat -c %a "$p" 2>/dev/null || stat -f %Mp%Lp "$p")
+  chown "$o" "$t" 2>/dev/null || true
+  chmod "$m" "$t"
 else
   chmod "$(printf '%o' $((0666 & ~$(umask))))" "$t"
 fi

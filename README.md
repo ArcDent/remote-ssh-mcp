@@ -7,19 +7,20 @@
 - 在 `~/.ssh/config` 里配好的任意主机上跑命令，结果直接返回给 agent。
 - 一次调用同时跑几条互不依赖的命令，或在几台主机上同时跑同一条命令，结果按标签分段返回。
 - 脚本和数据经标准输入传过去，在容器里跑命令，在 Windows 主机上跑 PowerShell，都不需要 agent 自己处理多层引号，减轻运维负担。
-- 耗时长的命令放到后台跑，之后再查进度，不用 `sleep` 轮询。
+- 耗时长的命令放到后台跑，之后查进度、列出任务或停掉任务，不用 `sleep` 轮询。
 - 写远端文件或只改其中几处，会覆盖前自动备份到 `~/ops-backups/`。
 - 输出里的密码、token 默认打码。
 - 重启关机、装包卸包这类危险命令默认拦下，并提示 agent 让用户手动执行。
 
 ## 工具一览
 
-默认只给 agent 两个工具：
+默认只给 agent 三个工具：
 
 | 想做什么 | 工具 | 会不会改东西 |
 |---|---|---|
 | 跑任意命令 | `exec` | 会 |
 | 覆盖、追加或局部修改文件 | `file_write` | 会，会在覆盖和修改前进行自动备份 |
+| 在后台跑耗时长的命令，查看、列出或停掉任务 | `job` | 会 |
 
 另外 9 个工具默认不出现，要用时在环境变量 `SSH_MCP_TOOLS` 里列出名字：
 - `file_read`（读文件）
@@ -49,8 +50,6 @@
 | `stdin` | 一段文本作为命令的标准输入，脚本、SQL 不用转义 | `{"host":"web1","cmd":"python3 -","stdin":"print('hi')"}` |
 | `container` | 在这个 docker 容器里跑，标准输入照样能传 | `{"host":"web1","container":"app","cmd":"cat /etc/os-release"}` |
 | `shell` | `posix`（默认）、`pwsh`（PowerShell 7）或 `powershell`（Windows PowerShell 5.1），其中PowerShell 脚本编码后传过去，不怕引号 | `{"host":"win1","shell":"powershell","cmd":"Get-Service sshd"}` |
-| `background` | 放到后台跑，立刻返回任务号 | `{"host":"web1","background":true,"cmd":"tar czf /root/site.tgz /var/www"}` |
-| `job` | 查后台任务的状态和日志末尾；同时传 `timeout` 时，在命令结束后再返回结果，最多等 `timeout` 秒 | `{"host":"web1","job":"j20261029-041307-f2ba","timeout":600}` |
 | `redact` | 默认 `true`，把 `password=`、`token:`、`Bearer …` 这类值换成 `<redacted>`；要看原值时传 `false` | `{"host":"web1","cmd":"cat .env","redact":false}` |
 | `timeout` | 秒，默认 60，最多 3600 | |
 | `max_chars` | 每路输出上限，默认 4000，其中分段时各段共用，短的段省下的额度让给长的段 | |
@@ -59,8 +58,36 @@
 
 - `cmds` 和数组形式的 `host` 可以一起用，一次最多 **20 段**；同一台主机最多同时开 **8 个 ssh 会话**，多出的排队。
 - `stdin` 只能配 `cmd`，不能和 `cmds` 一起传。
-- 后台任务只支持 `posix`。任务文件（命令、标准输入、日志、退出码）放在主机的 `~/.mcp-jobs/<任务号>/`，结束超过 7 天的会在下次启动后台任务时删掉。
-- Windows 主机（Git Bash、MSYS2、Cygwin）上，后台任务经 WMI 启动，ssh 断开后不会被一起停掉；返回的 pid 是 Windows 进程号。
+
+### job 的用法
+
+用 `action` 选要做的事，`host` 只能传一台主机：
+
+| action | 用途 | 例子 |
+|---|---|---|
+| `start` | 在后台跑 `cmd`，立刻返回任务号，ssh 断开后照常运行；`stdin`、`container` 的用法同 `exec` | `{"action":"start","host":"web1","cmd":"tar czf /root/site.tgz /var/www"}` |
+| `status` | 看任务状态和日志最后 200 行；传 `timeout` 时等任务结束再返回，最多等 `timeout` 秒 | `{"action":"status","host":"web1","id":"j20261029-041307-f2ba","timeout":600}` |
+| `list` | 列出主机上的任务，新的在前，最多 30 个，每个一行，带状态、用时和命令开头 | `{"action":"list","host":"web1"}` |
+| `kill` | 停掉任务和它启动的子进程 | `{"action":"kill","host":"web1","id":"j20261029-041307-f2ba"}` |
+
+任务有四种状态：
+
+| 状态 | 含义 |
+|---|---|
+| `running` | 还在跑 |
+| `done` | 已结束，带退出码 |
+| `killed` | 被 `kill` 停掉；退出码 143 表示收到停止信号后退出，137 表示 5 秒内没退出、被强制停掉 |
+| `lost` | 进程没了，也没留下退出码，比如主机重启过 |
+
+`kill` 在不同情况下的效果：
+
+| 情况 | kill 之后 |
+|---|---|
+| Linux、macOS 主机，以及 Windows 上的 Git Bash、MSYS2、Cygwin | 任务和它启动的子进程都停掉，包括 `ping.exe` 这类 Windows 原生程序 |
+| 用 `container` 在容器里启动的任务 | 停掉的是主机上的 `docker exec`，容器里的进程可能继续跑 |
+
+- `cmd` 按 POSIX shell 写，Windows 主机上在 Git Bash 里跑；返回的 pid 是 Windows 进程号。
+- 任务文件（命令、标准输入、日志、退出码）放在主机的 `~/.mcp-jobs/<任务号>/`，结束超过 7 天的会在下次 `start` 时删掉。
 
 ### file_write 的 edits
 
@@ -83,7 +110,7 @@
 
 ## 超时
 
-`exec` 和 `docker_exec` 的 `timeout` 可设 1 到 3600 秒，默认 60 秒，更久的命令用 `background`。运行期间每 10 秒向客户端报一次进度，免得长命令被 agent 丢弃。
+`exec` 和 `docker_exec` 的 `timeout` 可设 1 到 3600 秒，默认 60 秒，更久的命令用 `job` 放到后台跑。运行期间每 10 秒向客户端报一次进度，免得长命令被 agent 丢弃。
 
 到点后远端命令会不会真的停下，分为以下情况：
 
@@ -161,7 +188,7 @@ npm run call -- exec '{"host":"web1","cmds":{"disk":"df -h / | tail -1","load":"
 
 | 环境变量 | 说明 |
 | --- | --- |
-| `SSH_MCP_TOOLS` | 默认不设，只暴露 `exec` 和 `file_write`。设了就只暴露列出的工具（逗号分隔，`exec` 总在），如 `exec,file_write,xui_api`；设为 `all` 暴露全部 11 个。 |
+| `SSH_MCP_TOOLS` | 默认不设，只暴露 `exec`、`file_write` 和 `job`。设了就只暴露列出的工具（逗号分隔，`exec` 总在），如 `exec,file_write,job,xui_api`；设为 `all` 暴露全部 12 个。 |
 | `SSH_MCP_HOST_SHELLS` | 主机的默认 shell，逗号分隔的 `别名=shell`，如 `arcwin=powershell`。`exec` 的说明里会在这些主机名后标出 shell，不传 `shell` 时就用它。 |
 | `SSH_MCP_ALLOW_POWER` | 默认不设，`exec` / `docker_exec` 拦截电源类命令：reboot、shutdown、poweroff、halt、`init 0/6`、`systemctl reboot/poweroff/halt`、`systemctl start poweroff.target`、写 `/proc/sysrq-trigger`、`wpeutil reboot` 等，PowerShell 下还有 Restart-Computer、Stop-Computer。命令名不分大小写，`shutdown.exe` 也算。设为 `1` 才放开。 |
 | `SSH_MCP_ALLOW_PKG` | 默认不设，拦截装包类命令：apt / apt-get / aptitude / yum / dnf / apk 的 install、remove、purge、upgrade 等，`dpkg -i/-r/-P/--configure`（只模拟的 `apt-get -s` 等不拦），以及 Windows 的 choco / winget / scoop 的 install、uninstall、upgrade 和 msiexec /i /x；PowerShell 下还有 Install-Package 等。设为 `1` 才放开。 |
