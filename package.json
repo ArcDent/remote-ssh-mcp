@@ -1,6 +1,6 @@
 {
   "name": "@arcdent/remote-ssh-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "按 ~/.ssh/config 里的主机别名在远程主机上执行常用运维命令的 MCP 服务",
   "type": "module",
   "license": "MIT",
