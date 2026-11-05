@@ -72,6 +72,12 @@ export function text(t: string, isError = false): CallToolResult {
   return isError ? { content: [{ type: "text", text: t }], isError } : { content: [{ type: "text", text: t }] };
 }
 
+/** 在 text() 生成的结果前面加一行。 */
+export function withHeader(head: string, r: CallToolResult): CallToolResult {
+  const body = r.content[0]?.type === "text" ? r.content[0].text : "";
+  return text(`${head}\n${body}`, r.isError === true);
+}
+
 /** 返回 `exit=N`；命令不是自己退出的，就说明是什么让它停下的。 */
 function status(r: SshResult): string {
   // 实际等待的时间可能明显超过上限：主机发 KILL 前有宽限，本机 ssh 也有自己的宽限。

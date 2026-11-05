@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { hostArg, maxCharsArg, run, sh, shQuote, sudoArgs, type ToolFilter } from "./common.js";
+import { connArg, hostArg, maxCharsArg, run, sh, shQuote, sudoArgs, type ToolFilter } from "./common.js";
 
 /** x-ui 和 3x-ui 放面板库的位置，按顺序用第一个存在的。 */
 const XUI_DBS = ["/etc/x-ui/x-ui.db", "/opt/3x-ui/db/x-ui.db"];
@@ -26,27 +26,6 @@ U="$S://$L:$P$B"`;
 }
 
 export function registerNet(server: McpServer, on: ToolFilter): void {
-  if (on("http_probe")) server.registerTool(
-    "http_probe",
-    {
-      description: "从主机访问一个网址（可走代理），报告 HTTP 状态码、耗时和出口 IP。",
-      inputSchema: {
-        host: hostArg,
-        url: z.string().url(),
-        proxy: z.string().optional().describe("curl -x 的值，如 http://127.0.0.1:10809 或 socks5h://127.0.0.1:1080"),
-        timeout: z.number().int().min(1).max(120).default(15),
-        egress_ip: z.boolean().default(true).describe("同时经 api.ipify.org 查出口 IP"),
-        ...sudoArgs,
-      },
-    },
-    ({ host, url, proxy, timeout, egress_ip, sudo, pswd }, extra) => {
-      const via = proxy ? ` -x ${shQuote(proxy)}` : "";
-      let script = `curl -sS -o /dev/null -w 'http=%{http_code} time=%{time_total}s remote=%{remote_ip}\\n' --max-time ${timeout}${via} ${shQuote(url)} 2>&1`;
-      if (egress_ip) script += `\necho "egress_ip=$(curl -sS --max-time ${timeout}${via} https://api.ipify.org 2>&1)"`;
-      return run(host, sh(script), { timeoutS: timeout * 2 + 10, extra, sudo, pswd });
-    },
-  );
-
   if (on("xui_api")) server.registerTool(
     "xui_api",
     {
@@ -60,9 +39,10 @@ export function registerNet(server: McpServer, on: ToolFilter): void {
         body: z.string().optional().describe("JSON 请求体"),
         max_chars: maxCharsArg,
         ...sudoArgs,
+        conn: connArg,
       },
     },
-    ({ host, path, method, body, max_chars, sudo, pswd }, extra) => {
+    ({ host, path, method, body, max_chars, sudo, pswd, conn }, extra) => {
       const data = body !== undefined ? ` -H 'Content-Type: application/json' --data-binary @-` : "";
       // 响应体原样输出到标准输出，这样 JSON 会被压成一行；状态码不是 2xx 时报在标准错误里。
       const script = `${xuiBase()}
@@ -70,7 +50,7 @@ o=$(mktemp); trap 'rm -f "$o"' EXIT
 code=$(curl -sS -k --max-time 20 -o "$o" -w '%{http_code}' -X ${method} -H "Authorization: Bearer $T"${data} "$U/"${shQuote(path.replace(/^\/+/, ""))})
 cat "$o"
 case "$code" in 2*) ;; *) echo "http=$code" >&2; exit 22;; esac`;
-      return run(host, sh(script), { stdin: body, maxChars: max_chars, extra, sudo, pswd });
+      return run(host, sh(script), { stdin: body, maxChars: max_chars, extra, sudo, pswd, conn });
     },
   );
 }
