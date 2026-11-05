@@ -7,7 +7,8 @@ import { formatResult, formatSections, text } from "../output.js";
 import { decodeClixml, hostShells, powershellCommand, SHELLS, type Shell } from "../shell.js";
 import { clampTimeout } from "../ssh.js";
 import {
-  hostArg, inContainer, maxCharsArg, progressReporter, runRaw, sudoArgs, sudoRefusal, timeoutArg, type ToolExtra,
+  connArg, hostArg, inContainer, maxCharsArg, progressReporter, runRaw, sudoArgs, sudoRefusal, timeoutArg,
+  type ToolExtra,
 } from "./common.js";
 
 const MAX_CMDS = 10;
@@ -36,6 +37,10 @@ const inputSchema = {
   redact: z.boolean().optional().describe("给输出里的密钥值打码（password=、token:、Bearer ...），默认 true"),
   sudo: sudoArgs.sudo.describe("以 root 身份运行，家目录也换成 root 的；sudo 要密码时再传 pswd"),
   pswd: sudoArgs.pswd.describe("sudo 要的密码，一般是登录用户自己的；只试一次"),
+  conn: connArg.describe(
+    "这次单独改连接参数，只能配一台主机：port、user、identity（本机私钥路径，只用这把）、jump（跳板，须是上面的别名）、" +
+      "hostname（改连的地址，对端主机密钥须和该别名记录的一致）、password（密码登录，只试一次）。带 conn 时不复用已有连接",
+  ),
 };
 
 type ExecArgs = z.infer<z.ZodObject<typeof inputSchema>>;
@@ -72,6 +77,7 @@ async function exec(a: ExecArgs, extra: ToolExtra, shells: Map<string, Shell>): 
     if (bad) return text(`标签「${bad[0]}」不合法：只能用 1 到 32 个字母、数字或 _ . -`, true);
   }
   if (a.stdin !== undefined && a.cmds) return text("stdin 只能配 cmd，不能配 cmds。", true);
+  if (a.conn && hosts.length > 1) return text("conn 只能配一台主机。", true);
   if (a.container?.startsWith("-")) return text("container 要写容器名或 ID。", true);
   const runs: Run[] = hosts.flatMap((host) => {
     const shell = a.shell ?? shells.get(host) ?? "posix";
@@ -94,7 +100,7 @@ async function exec(a: ExecArgs, extra: ToolExtra, shells: Map<string, Shell>): 
   const results = await Promise.all(
     runs.map(async (r, i) => {
       const res = await runRaw(r.host, lines[i], {
-        timeoutS, stdin: a.stdin, extra, onTick, posix: r.shell === "posix", sudo: a.sudo, pswd: a.pswd,
+        timeoutS, stdin: a.stdin, extra, onTick, posix: r.shell === "posix", sudo: a.sudo, pswd: a.pswd, conn: a.conn,
       });
       return r.shell === "posix" ? res : { ...res, stderr: decodeClixml(res.stderr) };
     }),
@@ -105,8 +111,8 @@ async function exec(a: ExecArgs, extra: ToolExtra, shells: Map<string, Shell>): 
 }
 
 /**
- * 生成交给主机登录 shell 的命令行。标准输入经 `docker exec -i` 传进容器。主机端的 timeout 包装是
- * POSIX shell 写法，PowerShell 命令只在 MSYS 主机上加（见 runRaw）。
+ * 生成交给主机登录 shell 的命令行。主机端的 timeout 包装是 POSIX shell 写法，PowerShell 命令只在
+ * MSYS 主机上加（见 runRaw）。
  */
 function remote(r: Run, container?: string): string {
   if (r.shell !== "posix") return powershellCommand(r.shell, r.cmd);
