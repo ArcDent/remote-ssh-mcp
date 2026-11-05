@@ -54,7 +54,7 @@
 }
 ```
 
-想固定版本就写成 `@arcdent/remote-ssh-mcp@0.2.0`。从源码运行时，先在仓库里 `npm install`（会顺带构建），再把配置改成 `"command": "node"`、`"args": ["/path/to/remote-ssh-mcp/dist/index.js"]`。
+想固定版本就写成 `@arcdent/remote-ssh-mcp@0.3.0`。从源码运行时，先在仓库里 `npm install`（会顺带构建），再把配置改成 `"command": "node"`、`"args": ["/path/to/remote-ssh-mcp/dist/index.js"]`。
 
 <details>
 <summary>Claude Code</summary>
