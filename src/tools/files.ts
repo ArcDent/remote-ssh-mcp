@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatResult, REDACTED, text } from "../output.js";
-import { hostArg, maxCharsArg, run, runRaw, sh, shQuote, sudoArgs, type ToolExtra, type ToolFilter } from "./common.js";
+import type { Conn } from "../ssh.js";
+import { connArg, hostArg, run, runRaw, sh, shQuote, sudoArgs, type ToolExtra, type ToolFilter } from "./common.js";
 
 const pathArg = z.string().min(1).describe("远端绝对路径");
-const tagArg = z.string().regex(/^[A-Za-z0-9._-]+$/);
 
 /**
  * `bk <path> <tag> [name]` 把文件复制（目录则打成 tar 包）到 $HOME/ops-backups/<YYYYMMDD>-<tag>/[name]，
@@ -25,28 +25,6 @@ bk() {
 }`;
 
 export function registerFiles(server: McpServer, on: ToolFilter): void {
-  if (on("file_read")) server.registerTool(
-    "file_read",
-    {
-      description: "读取远端文本文件，可指定行范围。",
-      inputSchema: {
-        host: hostArg,
-        path: pathArg,
-        start_line: z.number().int().min(1).optional(),
-        lines: z.number().int().min(1).optional().describe("从 start_line 起读几行"),
-        max_chars: maxCharsArg,
-        ...sudoArgs,
-      },
-    },
-    ({ host, path, start_line, lines, max_chars, sudo, pswd }, extra) => {
-      const from = start_line ?? 1;
-      const range = lines ? `${from},${from + lines - 1}p` : `${from},$p`;
-      const read = start_line || lines ? `sed -n '${range}' "$p"` : `cat "$p"`;
-      const script = `p=${shQuote(path)}; [ -f "$p" ] || { echo "not a file: $p" >&2; exit 1; }; ${read}`;
-      return run(host, sh(script), { maxChars: max_chars, extra, sudo, pswd });
-    },
-  );
-
   if (on("file_write")) server.registerTool(
     "file_write",
     {
@@ -63,30 +41,16 @@ export function registerFiles(server: McpServer, on: ToolFilter): void {
         mode: z.enum(["overwrite", "append"]).default("overwrite"),
         backup: z.boolean().default(true).describe("覆盖前先备份"),
         ...sudoArgs,
+        conn: connArg,
       },
     },
-    ({ host, path, content, edits, mode, backup, sudo, pswd }, extra) => {
+    ({ host, path, content, edits, mode, backup, sudo, pswd, conn }, extra) => {
       if ((content === undefined) === (edits === undefined)) return text("content 和 edits 必须且只能传一个。", true);
       if (edits) {
         if (mode === "append") return text("edits 不能和 mode append 一起用。", true);
-        return editFile(host, path, edits, backup, extra, { sudo, pswd });
+        return editFile(host, path, edits, backup, extra, { sudo, pswd, conn });
       }
-      return run(host, sh(writeScript(path, mode, backup)), { stdin: content, extra, sudo, pswd });
-    },
-  );
-
-  if (on("backup_file")) server.registerTool(
-    "backup_file",
-    {
-      description:
-        "把远端文件或目录（目录打成 tar.gz）备份到 ~/ops-backups/<YYYYMMDD>-<tag>/，附 sha256 文件。用 exec 改文件前先用它备份。",
-      inputSchema: { host: hostArg, path: pathArg, tag: tagArg.describe("简短的名字，如 xray-chain"), ...sudoArgs },
-    },
-    ({ host, path, tag, sudo, pswd }, extra) => {
-      const script = `p=${shQuote(path)}; [ -e "$p" ] || { echo "not found: $p" >&2; exit 1; }
-${BACKUP_FN}
-bk "$p" ${shQuote(tag)}`;
-      return run(host, sh(script), { extra, sudo, pswd });
+      return run(host, sh(writeScript(path, mode, backup)), { stdin: content, extra, sudo, pswd, conn });
     },
   );
 }
@@ -120,7 +84,7 @@ async function editFile(
   edits: { old: string; new: string }[],
   backup: boolean,
   extra: ToolExtra,
-  asRoot: { sudo?: boolean; pswd?: string },
+  access: { sudo?: boolean; pswd?: string; conn?: Conn },
 ) {
   const read = await runRaw(
     host,
@@ -128,7 +92,7 @@ async function editFile(
 [ -f "$p" ] || { echo "not a file: $p" >&2; exit 1; }
 [ "$(wc -c < "$p")" -le ${MAX_EDIT_BYTES} ] || { echo "too big for edits (over 1 MB): $p" >&2; exit 1; }
 base64 < "$p"`),
-    { extra, ...asRoot },
+    { extra, ...access },
   );
   if (read.code !== 0) return formatResult(read);
   const buf = Buffer.from(read.stdout, "base64");
@@ -136,7 +100,7 @@ base64 < "$p"`),
   if (!Buffer.from(before, "utf8").equals(buf)) return text(`${path} 不是 UTF-8 文本，请改用 content 整份写入。`, true);
   const after = applyEdits(before, edits);
   const sha = createHash("sha256").update(buf).digest("hex");
-  return run(host, sh(writeScript(path, "overwrite", backup, sha)), { stdin: after, extra, ...asRoot });
+  return run(host, sh(writeScript(path, "overwrite", backup, sha)), { stdin: after, extra, ...access });
 }
 
 /**

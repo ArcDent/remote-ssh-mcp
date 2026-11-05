@@ -1,32 +1,52 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
-  clampTimeout, Gate, KILL_GRACE_S, MAX_TIMEOUT_S, parseProbe, probeHost, remoteTimeoutWrap, sudoWrap,
+  clampTimeout, connArgs, Gate, KILL_GRACE_S, MAX_TIMEOUT_S, parseProbe, probeHost, remoteTimeoutWrap, runSsh, sudoWrap,
+  Tap,
 } from "../src/ssh.js";
 
-// 给 probeHost 用的 ssh 是假的；下面 shell 层面的测试仍用真的 spawnSync。
-const fakeSsh = vi.hoisted(() => ({ calls: [] as string[][], stdout: "" }));
+// 给 probeHost、runSsh 用的 ssh 是假的；下面 shell 层面的测试仍用真的 spawnSync。假 ssh 依次输出 queue 里的
+// 内容（空了就用 stdout），把收到的标准输入记进 stdins；拿到 askpass 时连问两次密码，记下每次的输出。
+const fakeSsh = vi.hoisted(() => ({
+  calls: [] as string[][],
+  envs: [] as (NodeJS.ProcessEnv | undefined)[],
+  askpass: [] as { status: number | null; stdout: string }[],
+  stdins: [] as Promise<Buffer>[],
+  queue: [] as (string | Buffer)[],
+  stdout: "",
+}));
 vi.mock("node:child_process", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:child_process")>();
   return {
     ...real,
-    spawn: (cmd: string, args: string[]) => {
+    spawn: (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
       fakeSsh.calls.push([cmd, ...args]);
+      fakeSsh.envs.push(opts?.env);
+      const askpass = opts?.env?.SSH_ASKPASS;
+      if (askpass) {
+        for (let i = 0; i < 2; i++) fakeSsh.askpass.push(real.spawnSync(askpass, { env: opts.env, encoding: "utf8" }));
+      }
       const child = Object.assign(new EventEmitter(), {
         stdout: new PassThrough(),
         stderr: new PassThrough(),
         stdin: new PassThrough(),
         kill: () => true,
       });
+      const got: Buffer[] = [];
+      child.stdin.on("data", (d: Buffer) => got.push(d));
+      fakeSsh.stdins.push(new Promise((resolve) => child.stdin.on("end", () => resolve(Buffer.concat(got)))));
+      const out = fakeSsh.queue.shift() ?? fakeSsh.stdout;
+      // 和真的子进程一样，标准输出读完才发 close。
+      child.stdout.on("end", () => setTimeout(() => child.emit("close", 0), 5));
       setTimeout(() => {
-        child.stdout.end(fakeSsh.stdout);
+        child.stdout.end(out);
         child.stderr.end();
-        setTimeout(() => child.emit("close", 0), 5);
       }, 1);
       return child;
     },
@@ -65,6 +85,83 @@ describe("probeHost", () => {
     expect(await probeHost("probe-once")).toEqual({ timeout: true, msys: true });
     expect(fakeSsh.calls).toHaveLength(1);
     expect(fakeSsh.calls[0].at(-1)).toContain("uname -s");
+  });
+});
+
+describe("connArgs", () => {
+  // 临时的 ssh config 和 known_hosts；主机密钥用 ssh-keygen 现生成一把。
+  const dir = mkdtempSync(join(tmpdir(), "ssh-mcp-conn-"));
+  const kh = join(dir, "known_hosts");
+  const config = join(dir, "config");
+  const key = join(dir, "id");
+  writeFileSync(kh, "");
+  writeFileSync(
+    config,
+    ["Host t", "  HostName 10.9.8.7", "  Port 2222", `  UserKnownHostsFile ${kh}`, "  GlobalKnownHostsFile /dev/null", "Host j"].join(
+      "\n",
+    ),
+  );
+  spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key]);
+
+  it("每个字段生成对应的 ssh 选项，且不复用已有连接", () => {
+    const { args, password } = connArgs("t", { port: 2200, user: "root", identity: key, jump: "j" }, config);
+    expect(args.slice(0, 4)).toEqual(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+    const line = args.join(" ");
+    for (const part of ["-J j", "-p 2200", "-l root", `-i ${key} -o IdentitiesOnly=yes`]) expect(line).toContain(part);
+    expect(password).toBeUndefined();
+  });
+
+  it("跳板不是别名、密钥文件不存在时拒绝", () => {
+    expect(() => connArgs("t", { jump: "10.0.0.1" }, config)).toThrow(/未知主机「10\.0\.0\.1」/);
+    expect(() => connArgs("t", { identity: join(dir, "none") }, config)).toThrow(/不是本机上的文件/);
+  });
+
+  it("改 HostName 时要求对端主机密钥和别名原来的记录一致，没有记录就拒绝", () => {
+    expect(() => connArgs("t", { hostname: "100.64.0.2" }, config)).toThrow(/known_hosts 里没有「t」的主机密钥/);
+    const pub = readFileSync(`${key}.pub`, "utf8").split(" ").slice(0, 2).join(" ");
+    writeFileSync(kh, `[10.9.8.7]:2222 ${pub}\n`);
+    expect(connArgs("t", { hostname: "100.64.0.2" }, config).args.join(" ")).toContain(
+      "-o HostName=100.64.0.2 -o HostKeyAlias=[10.9.8.7]:2222 -o StrictHostKeyChecking=yes",
+    );
+  });
+
+  it("带密码时开 askpass 登录，只试一次，第一次连接记下主机密钥", () => {
+    const { args, password } = connArgs("t", { password: "pw" }, config);
+    expect(password).toBe("pw");
+    const line = args.join(" ");
+    for (const part of ["BatchMode=no", "NumberOfPasswordPrompts=1", "StrictHostKeyChecking=accept-new"]) {
+      expect(line).toContain(part);
+    }
+    expect(args).not.toContain("pw");
+  });
+});
+
+describe("runSsh 带密码", () => {
+  it("密码经 askpass 交给 ssh，只给一次，不进命令行，用完删掉 askpass", async () => {
+    fakeSsh.calls.length = 0;
+    fakeSsh.envs.length = 0;
+    fakeSsh.askpass.length = 0;
+    await runSsh("conn-pw", "true", { conn: { args: ["-o", "ControlPath=none"], password: "s3cret" } });
+    expect(fakeSsh.calls[0].slice(0, 3)).toEqual(["ssh", "-o", "ControlPath=none"]);
+    expect(fakeSsh.calls[0].join(" ")).not.toContain("s3cret");
+    const env = fakeSsh.envs[0]!;
+    expect(env.SSH_ASKPASS_REQUIRE).toBe("force");
+    expect(fakeSsh.askpass.map((r) => [r.status, r.stdout])).toEqual([[0, "s3cret\n"], [1, ""]]);
+    expect(existsSync(env.SSH_ASKPASS!)).toBe(false);
+  });
+});
+
+describe("runSsh 流式", () => {
+  it("A 的标准输出边读边写进 B 的标准输入，字节数和 sha256 都对得上", async () => {
+    const data = randomBytes(5_000_000);
+    fakeSsh.stdins.length = 0;
+    fakeSsh.queue.push(data, "");
+    const tap = new Tap();
+    await Promise.all([runSsh("pipe-a", "cat big", { stdout: tap }), runSsh("pipe-b", "sha256sum", { stdin: tap })]);
+    const got = await fakeSsh.stdins[1];
+    expect(got.equals(data)).toBe(true);
+    expect(tap.bytes).toBe(5_000_000);
+    expect(tap.sha256()).toBe(createHash("sha256").update(data).digest("hex"));
   });
 });
 
