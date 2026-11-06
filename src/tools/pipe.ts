@@ -33,7 +33,7 @@ export function registerPipe(server: McpServer, on: ToolFilter): void {
     {
       description:
         "把来源的数据直接接到主机上命令的标准输入，效果同 `ssh A '<cmd>' | ssh B '<cmd>'`，数据只经过本机内存、不落盘。" +
-        '如 from {"host":"a","cmd":"tar -C /etc -cf - nginx"}、to {"host":"b","cmd":"tar -C /etc -xf -"}。' +
+        '如 from {"host":"a","cmd":"tar -C /etc -cf - nginx"}、to {"host":"b","cmd":"mkdir -p /backup/etc && tar -C /backup/etc -xf -"}。' +
         "两端各自可带 sudo、pswd、conn，用法同 exec。返回两端的退出码、传输的字节数和 sha256。",
       inputSchema,
     },
